@@ -43,7 +43,10 @@ android/
 
 ## 版本管理
 
-每次打包前修改 `pubspec.yaml` 的 `version`（如 `0.1.0+1` → `0.1.0+2`），提交后触发构建，便于对应版本反馈。
+- 版本号从 `0.0.1` 起步，每次打包最后一位 +1（`0.0.1` → `0.0.2` → …）。
+- 修改 `pubspec.yaml` 的 `version` 后，打 tag `vX.Y.Z` 并推送，触发构建并**自动创建 Release**（附 APK）。
+- 直接推送到 main 分支只构建 APK（存为 Artifact），打 tag 才创建 Release。
+- 下载：仓库 **Releases** 页拿对应版本的 APK，或用 Actions 页的 Artifact。
 
 ## 里程碑
 
