@@ -48,6 +48,22 @@ class MainActivity : FlutterActivity() {
                         val path = call.argument<String>("path") ?: ""
                         result.success(getThumbnail(path))
                     }
+                    "listTrash" -> {
+                        val dir = call.argument<String>("dir") ?: ""
+                        result.success(listTrash(dir))
+                    }
+                    "restoreFromTrash" -> {
+                        val src = call.argument<String>("src") ?: ""
+                        result.success(restoreFromTrash(src))
+                    }
+                    "emptyTrash" -> {
+                        val dir = call.argument<String>("dir") ?: ""
+                        result.success(emptyTrash(dir))
+                    }
+                    "listSubDirs" -> {
+                        val dir = call.argument<String>("dir") ?: ""
+                        result.success(listSubDirs(dir))
+                    }
                     else -> result.notImplemented()
                 }
             }
@@ -56,9 +72,20 @@ class MainActivity : FlutterActivity() {
     private fun listMediaFiles(dir: String): List<String> {
         val d = File(dir)
         if (!d.exists() || !d.isDirectory) return emptyList()
-        return d.listFiles { f ->
-            f.isFile && mediaExtensions.any { f.name.lowercase().endsWith(it) }
-        }?.map { it.absolutePath }?.sorted() ?: emptyList()
+        val result = mutableListOf<String>()
+        fun walk(f: File) {
+            val children = f.listFiles() ?: return
+            for (c in children) {
+                when {
+                    // 跳过隐藏目录（.trash 等）
+                    c.isDirectory && !c.name.startsWith(".") -> walk(c)
+                    c.isFile && mediaExtensions.any { c.name.lowercase().endsWith(it) } ->
+                        result.add(c.absolutePath)
+                }
+            }
+        }
+        walk(d)
+        return result.sorted()
     }
 
     private fun renameFile(src: String, newName: String): String? {
@@ -104,5 +131,34 @@ class MainActivity : FlutterActivity() {
         } catch (e: Exception) {
             null
         }
+    }
+
+    private fun listTrash(dir: String): List<String> {
+        val trashDir = File(dir, ".trash")
+        if (!trashDir.exists() || !trashDir.isDirectory) return emptyList()
+        return trashDir.listFiles { f -> f.isFile }
+            ?.map { it.absolutePath }?.sorted() ?: emptyList()
+    }
+
+    private fun restoreFromTrash(src: String): Boolean {
+        val f = File(src)
+        if (!f.exists()) return false
+        val trashParent = f.parentFile ?: return false
+        val originalDir = trashParent.parentFile ?: return false
+        val dest = File(originalDir, f.name)
+        return if (dest.exists()) false else f.renameTo(dest)
+    }
+
+    private fun emptyTrash(dir: String): Boolean {
+        val trashDir = File(dir, ".trash")
+        if (!trashDir.exists()) return true
+        return trashDir.listFiles()?.all { it.delete() } ?: false
+    }
+
+    private fun listSubDirs(dir: String): List<String> {
+        val d = File(dir)
+        if (!d.exists() || !d.isDirectory) return emptyList()
+        return d.listFiles { f -> f.isDirectory && !f.name.startsWith(".") }
+            ?.map { it.name }?.sorted() ?: emptyList()
     }
 }

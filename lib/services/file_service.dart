@@ -53,4 +53,40 @@ class FileService {
       {'path': path},
     );
   }
+
+  /// 列出回收站（.trash）中的文件完整路径。
+  static Future<List<String>> listTrash(String dir) async {
+    return await _channel.invokeListMethod<String>(
+          'listTrash',
+          {'dir': dir},
+        ) ??
+        const [];
+  }
+
+  /// 从回收站恢复到原目录，返回是否成功。
+  static Future<bool> restoreFromTrash(String srcPath) async {
+    return await _channel.invokeMethod<bool>(
+          'restoreFromTrash',
+          {'src': srcPath},
+        ) ??
+        false;
+  }
+
+  /// 清空回收站（物理删除），返回是否成功。
+  static Future<bool> emptyTrash(String dir) async {
+    return await _channel.invokeMethod<bool>(
+          'emptyTrash',
+          {'dir': dir},
+        ) ??
+        false;
+  }
+
+  /// 列出目录下的子目录名（排除隐藏目录），用于分类移动。
+  static Future<List<String>> listSubDirs(String dir) async {
+    return await _channel.invokeListMethod<String>(
+          'listSubDirs',
+          {'dir': dir},
+        ) ??
+        const [];
+  }
 }

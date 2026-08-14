@@ -6,6 +6,7 @@ import 'package:video_player/video_player.dart';
 import '../core/filename_parser.dart';
 import '../models/media_item.dart';
 import '../services/file_service.dart';
+import 'move_dialog.dart';
 
 /// 全屏流浏览：上下滑切换，双击星标，底部操作条。
 class FeedPage extends StatefulWidget {
@@ -58,6 +59,20 @@ class _FeedPageState extends State<FeedPage> {
 
   Future<void> _delete(int i) async {
     final ok = await FileService.deleteToTrash(_items[i].path);
+    if (ok && mounted) {
+      setState(() {
+        _items.removeAt(i);
+        if (_items.isEmpty) Navigator.of(context).pop();
+      });
+    }
+  }
+
+  Future<void> _move(int i) async {
+    final item = _items[i];
+    final parentDir = dirnameOf(item.path);
+    final target = await showMoveDialog(context, parentDir);
+    if (target == null) return;
+    final ok = await FileService.moveFile(item.path, '$parentDir/$target');
     if (ok && mounted) {
       setState(() {
         _items.removeAt(i);
@@ -163,6 +178,11 @@ class _FeedPageState extends State<FeedPage> {
                   ),
                 ),
               const Spacer(),
+              // 移动
+              IconButton(
+                onPressed: () => _move(_currentIndex),
+                icon: const Icon(Icons.drive_file_move, color: Colors.white),
+              ),
               // 删除
               IconButton(
                 onPressed: () => _delete(_currentIndex),
