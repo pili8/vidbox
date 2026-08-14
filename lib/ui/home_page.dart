@@ -1,17 +1,18 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 
-import '../core/filename_parser.dart';
 import '../core/grouper.dart';
 import '../models/media_item.dart';
 import '../services/file_service.dart';
-import '../services/index_service.dart';
+import '../services/media_store.dart';
 import '../services/settings_service.dart';
 import 'feed_page.dart';
 import 'grid_page.dart';
 import 'trash_page.dart';
 
-/// 首页：目录管理、扫描、分组展示、待整理、网格/回收站入口。
+/// 首页：目录管理、自动增量扫描、作者分组总览、已收藏/图集入口、待整理。
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
 
@@ -22,23 +23,39 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> {
   final _dirController = TextEditingController();
   List<String> _dirs = [];
-  List<MediaItem> _items = [];
-  GroupingResult? _grouping;
   bool _loading = false;
   String? _error;
   bool _permissionGranted = false;
+  bool _didInitialScan = false;
+
+  MediaStore get _store => MediaStore.instance;
 
   @override
   void initState() {
     super.initState();
     _checkPermission();
     _loadDirs();
+    _store.addListener(_onStoreChange);
+  }
+
+  Future<void> _loadDirs() async {
+    final dirs = await SettingsService.getScanDirs();
+    if (mounted) setState(() => _dirs = dirs);
+    // 目录加载后清理回收站中超过 30 天的文件
+    for (final dir in dirs) {
+      await FileService.cleanupTrash(dir, days: 30);
+    }
   }
 
   @override
   void dispose() {
+    _store.removeListener(_onStoreChange);
     _dirController.dispose();
     super.dispose();
+  }
+
+  void _onStoreChange() {
+    if (mounted) setState(() {});
   }
 
   Future<void> _checkPermission() async {
@@ -46,13 +63,14 @@ class _HomePageState extends State<HomePage> {
     if (!status.isGranted) {
       status = await Permission.manageExternalStorage.request();
     }
-    if (mounted) setState(() => _permissionGranted = status.isGranted);
+    if (mounted) {
+      setState(() => _permissionGranted = status.isGranted);
+      // 权限就绪且还没扫过，自动扫描一次
+      if (status.isGranted && !_didInitialScan) _scan();
+    }
   }
 
-  Future<void> _loadDirs() async {
-    final dirs = await SettingsService.getScanDirs();
-    if (mounted) setState(() => _dirs = dirs);
-  }
+
 
   Future<void> _addDir() async {
     final dir = _dirController.text.trim();
@@ -63,6 +81,7 @@ class _HomePageState extends State<HomePage> {
       if (mounted) setState(() => _dirs = newDirs);
     }
     _dirController.clear();
+    _scan();
   }
 
   Future<void> _removeDir(String dir) async {
@@ -76,18 +95,10 @@ class _HomePageState extends State<HomePage> {
     setState(() {
       _loading = true;
       _error = null;
+      _didInitialScan = true;
     });
-
     try {
-      // 增量索引：未变化的文件直接读缓存，只重新解析变化的文件
-      final items = await IndexService.scanAndIndex(_dirs);
-      final grouping = Grouper.group(items);
-      if (mounted) {
-        setState(() {
-          _items = items;
-          _grouping = grouping;
-        });
-      }
+      await _store.rescan(_dirs);
     } catch (e) {
       if (mounted) setState(() => _error = '扫描失败: $e');
     } finally {
@@ -95,9 +106,11 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  void _openGrid() {
+  void _openGrid([List<MediaItem>? items]) {
     Navigator.of(context).push(
-      MaterialPageRoute(builder: (_) => GridPage(items: _items)),
+      MaterialPageRoute(
+        builder: (_) => GridPage(items: items ?? _store.items),
+      ),
     );
   }
 
@@ -116,7 +129,111 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  /// 对待整理文件改名，重命名后自动重新解析归位。
+  /// 待整理批量改名：选中多个 → 统一设作者名 → 批量重命名归位。
+  Future<void> _batchRenameUnparsed(List<MediaItem> unparsed) async {
+    final selected = <String>{}; // 选中文件的 path
+    final authorController = TextEditingController();
+
+    final result = await showDialog<(String, Set<String>)>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: const Text('待整理批量改名'),
+          content: SizedBox(
+            width: 400,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: authorController,
+                  decoration: const InputDecoration(
+                    labelText: '作者名（必填，会写入 dy<N>_作者_视频_...）',
+                    isDense: true,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Text('已选 ${selected.length} 个',
+                    style: Theme.of(ctx).textTheme.bodySmall),
+                const SizedBox(height: 4),
+                Flexible(
+                  child: SizedBox(
+                    height: 260,
+                    child: ListView(
+                      shrinkWrap: true,
+                      children: unparsed.map((u) {
+                        final checked = selected.contains(u.path);
+                        return CheckboxListTile(
+                          dense: true,
+                          value: checked,
+                          title: Text(u.filename,
+                              maxLines: 1, overflow: TextOverflow.ellipsis),
+                          onChanged: (v) => setDialogState(() {
+                            if (v == true) {
+                              selected.add(u.path);
+                            } else {
+                              selected.remove(u.path);
+                            }
+                          }),
+                        );
+                      }).toList(),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+            TextButton(
+              onPressed: () {
+                final author = authorController.text.trim();
+                if (author.isEmpty || selected.isEmpty) {
+                  ScaffoldMessenger.of(ctx).showSnackBar(
+                    const SnackBar(content: Text('请填写作者名并至少选一个文件')),
+                  );
+                  return;
+                }
+                Navigator.pop(ctx, (author: author, paths: selected.toSet()));
+              },
+              child: const Text('批量改名'),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    if (result == null) return;
+    var ok = 0, fail = 0;
+    final now = DateTime.now();
+    for (final (i, path) in result.$2.indexed) {
+      final idx = _store.indexOf(path);
+      if (idx < 0) {
+        fail++;
+        continue;
+      }
+      final f = File(path);
+      final ext = f.existsSync() && f.uri.pathSegments.isNotEmpty
+          ? f.path.split('.').last
+          : 'mp4';
+      // 14 位时间戳 YYYYMMDDHHMMSS + 序号（从当前秒递增）
+      String two(int n) => n.toString().padLeft(2, '0');
+      final ts =
+          '${now.year}${two(now.month)}${two(now.day)}${two(now.hour)}${two(now.minute)}${two(now.second + i)}';
+      final newName = 'dy1_${result.$1}_视频_重命名${i + 1}_${ts}_${i + 1}.$ext';
+      if (await _store.rename(idx, newName)) {
+        ok++;
+      } else {
+        fail++;
+      }
+    }
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(fail == 0 ? '批量改名成功 $ok 个' : '成功 $ok 个，失败 $fail 个')),
+      );
+    }
+  }
+
   Future<void> _renameUnparsed(MediaItem item) async {
     final controller = TextEditingController(text: item.filename);
     final newName = await showDialog<String>(
@@ -126,7 +243,7 @@ class _HomePageState extends State<HomePage> {
         content: TextField(
           controller: controller,
           decoration: const InputDecoration(
-            hintText: '输入 dy1_作者_类型_标题_时间戳_序号.扩展名 格式',
+            hintText: '输入 dy<N>_作者_类型_标题_时间戳_序号.扩展名 格式',
           ),
         ),
         actions: [
@@ -141,22 +258,21 @@ class _HomePageState extends State<HomePage> {
         ],
       ),
     );
-
     if (newName == null || newName.isEmpty || newName == item.filename) return;
-    final newPath = await FileService.renameFile(item.path, newName);
-    if (newPath != null) {
-      await IndexService.updatePath(item.path, newPath);
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('已重命名，重新扫描后归位')),
-        );
-        _scan();
-      }
+    final i = _store.indexOf(item.path);
+    if (i < 0) return;
+    final ok = await _store.rename(i, newName);
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(ok ? '已重命名，已归位' : '重命名失败（检查文件名是否合法）')),
+      );
     }
   }
 
   @override
   Widget build(BuildContext context) {
+    final grouping = _store.grouping;
+    final items = _store.items;
     return Scaffold(
       appBar: AppBar(
         title: const Text('VidBox'),
@@ -167,7 +283,7 @@ class _HomePageState extends State<HomePage> {
           ),
           IconButton(
             icon: const Icon(Icons.grid_view),
-            onPressed: _items.isEmpty ? null : _openGrid,
+            onPressed: items.isEmpty ? null : () => _openGrid(),
           ),
         ],
       ),
@@ -175,7 +291,7 @@ class _HomePageState extends State<HomePage> {
         children: [
           if (!_permissionGranted) _buildPermissionBanner(),
           _buildDirSection(),
-          Expanded(child: _buildResult()),
+          Expanded(child: _buildResult(grouping, items)),
         ],
       ),
     );
@@ -210,10 +326,7 @@ class _HomePageState extends State<HomePage> {
                 ),
               ),
               const SizedBox(width: 8),
-              IconButton(
-                icon: const Icon(Icons.add),
-                onPressed: _addDir,
-              ),
+              IconButton(icon: const Icon(Icons.add), onPressed: _addDir),
               const SizedBox(width: 4),
               FilledButton(
                 onPressed: _loading ? null : _scan,
@@ -242,63 +355,147 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  Widget _buildResult() {
+  Widget _buildResult(GroupingResult? grouping, List<MediaItem> items) {
     if (_loading) {
       return const Center(child: CircularProgressIndicator());
     }
     if (_error != null) {
       return Center(child: Text(_error!));
     }
-    final g = _grouping;
-    if (g == null) {
-      return const Center(child: Text('添加目录后点击"扫描"'));
+    if (grouping == null) {
+      return const Center(child: Text('授权后自动扫描，或添加目录后点击"扫描"'));
     }
-    if (_items.isEmpty) {
+    if (items.isEmpty) {
       return const Center(child: Text('目录下没有视频或图片'));
     }
 
-    final authors = g.authors.values.toList()
+    final authors = grouping.authors.values.toList()
       ..sort((a, b) => a.author.compareTo(b.author));
 
-    return ListView(
-      children: [
-        Padding(
-          padding: const EdgeInsets.all(12),
-          child: Text(
-            '共 ${_items.length} 个文件 · ${authors.length} 个作者 · ${g.unparsed.length} 个待整理',
-            style: Theme.of(context).textTheme.bodyMedium,
-          ),
-        ),
-        ...authors.map((a) {
-          final videos = [...a.videos];
-          final albumImages = a.albumSets.values.expand((l) => l).toList();
-          final all = [...videos, ...albumImages];
-          return ListTile(
-            leading: const Icon(Icons.person),
-            title: Text(a.author),
-            subtitle: Text(
-              '视频 ${a.videos.length} · 图集 ${a.albumSets.length} 组 · 共 ${a.totalCount} 项',
-            ),
-            onTap: () => _openFeed(all, 0),
-          );
-        }),
-        if (g.unparsed.isNotEmpty) ...[
-          const Divider(),
+    final starredCount = items.where((it) => it.isStarred).length;
+    final albumCount = items.where((it) => it.type == MediaType.album).length;
+
+    return RefreshIndicator(
+      onRefresh: _scan,
+      child: ListView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        children: [
+          // 快捷入口
           Padding(
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-            child: Text(
-              '待整理（点击可重命名归位）',
-              style: Theme.of(context).textTheme.labelMedium,
+            padding: const EdgeInsets.all(12),
+            child: Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                ActionChip(
+                  avatar: const Icon(Icons.star, color: Colors.amber, size: 18),
+                  label: Text('已收藏 $starredCount'),
+                  onPressed:
+                      starredCount == 0 ? null : () => _openFeed(_store.starredItems(), 0),
+                ),
+                ActionChip(
+                  avatar: const Icon(Icons.photo_library, size: 18),
+                  label: Text('图集 $albumCount'),
+                  onPressed:
+                      albumCount == 0 ? null : () => _openFeed(_store.albumItems(), 0),
+                ),
+              ],
             ),
           ),
-          ...g.unparsed.map((u) => ListTile(
-                leading: const Icon(Icons.inbox),
-                title: Text(u.filename, maxLines: 1, overflow: TextOverflow.ellipsis),
-                trailing: const Icon(Icons.edit, size: 18),
-                onTap: () => _renameUnparsed(u),
-              )),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            child: Text(
+              '共 ${items.length} 个文件 · ${authors.length} 个作者 · ${grouping.unparsed.length} 个待整理',
+              style: Theme.of(context).textTheme.bodyMedium,
+            ),
+          ),
+          ...authors.map((a) {
+            final videos = [...a.videos];
+            final albumImages = a.albumSets.values.expand((l) => l).toList();
+            final all = [...videos, ...albumImages];
+            final starred = all.where((it) => it.isStarred).length;
+            final thumb = all.isNotEmpty ? all.last : null;
+            return ListTile(
+              leading: thumb != null
+                  ? SizedBox(
+                      width: 40,
+                      height: 40,
+                      child: _AuthorThumb(item: thumb),
+                    )
+                  : const Icon(Icons.person),
+              title: Text(a.author),
+              subtitle: Text(
+                '${a.videos.length} 视频 · ${a.albumSets.length} 图集 · 收藏 $starred',
+              ),
+              onTap: () => _openFeed(all, 0),
+            );
+          }),
+          if (grouping.unparsed.isNotEmpty) ...[
+            const Divider(),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      '待整理（点击单个重命名归位）',
+                      style: Theme.of(context).textTheme.labelMedium,
+                    ),
+                  ),
+                  TextButton(
+                    onPressed: () => _batchRenameUnparsed(grouping.unparsed),
+                    child: const Text('批量改名'),
+                  ),
+                ],
+              ),
+            ),
+            ...grouping.unparsed.map((u) => ListTile(
+                  leading: const Icon(Icons.inbox),
+                  title: Text(u.filename, maxLines: 1, overflow: TextOverflow.ellipsis),
+                  trailing: const Icon(Icons.edit, size: 18),
+                  onTap: () => _renameUnparsed(u),
+                )),
+          ],
         ],
-      ],
+      ),
+    );
+  }
+}
+
+/// 作者缩略图（复用 IndexService 磁盘缓存）
+class _AuthorThumb extends StatefulWidget {
+  final MediaItem item;
+  const _AuthorThumb({required this.item});
+
+  @override
+  State<_AuthorThumb> createState() => _AuthorThumbState();
+}
+
+class _AuthorThumbState extends State<_AuthorThumb> {
+  @override
+  Widget build(BuildContext context) {
+    if (widget.item.isImage) {
+      return ClipRRect(
+        borderRadius: BorderRadius.circular(4),
+        child: Image.file(
+          File(widget.item.path),
+          fit: BoxFit.cover,
+          errorBuilder: (_, __, ___) =>
+              const Icon(Icons.person, color: Colors.white54),
+        ),
+      );
+    }
+    return FutureBuilder(
+      future: MediaStore.instance.thumbFor(widget.item.path),
+      builder: (context, snap) {
+        final bytes = snap.data;
+        return ClipRRect(
+          borderRadius: BorderRadius.circular(4),
+          child: bytes == null
+              ? const Icon(Icons.person, color: Colors.white54)
+              : Image.memory(bytes, fit: BoxFit.cover),
+        );
+      },
     );
   }
 }

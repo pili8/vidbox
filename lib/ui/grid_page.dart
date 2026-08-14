@@ -3,14 +3,15 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 
-import '../core/filename_parser.dart';
 import '../models/media_item.dart';
-import '../services/file_service.dart';
 import '../services/index_service.dart';
+import '../services/media_store.dart';
 import 'feed_page.dart';
 import 'move_dialog.dart';
 
-/// 网格模式：按作者分组折叠 + 长按多选 + 批量操作。
+enum _SortMode { newest, oldest, starHigh }
+
+/// 网格模式：按作者分组折叠 + 筛选/搜索/排序 + 长按多选 + 批量操作。
 class GridPage extends StatefulWidget {
   final List<MediaItem> items;
 
@@ -21,18 +22,77 @@ class GridPage extends StatefulWidget {
 }
 
 class _GridPageState extends State<GridPage> {
-  late List<MediaItem> _items;
+  late List<MediaItem> _baseItems;
+  List<MediaItem> _filtered = [];
   late Map<String, List<MediaItem>> _groups;
+
   final Set<String> _selectedPaths = {};
   final Set<String> _collapsed = {};
   bool _selectionMode = false;
   final Map<String, Uint8List?> _thumbCache = {};
 
+  // 筛选与排序
+  String _query = '';
+  String _filter = '全部'; // 全部 / 已收藏 / 待整理 / 图集
+  _SortMode _sort = _SortMode.newest;
+
+  MediaStore get _store => MediaStore.instance;
+
   @override
   void initState() {
     super.initState();
-    _items = List.of(widget.items);
-    _groups = _groupByAuthor(_items);
+    _baseItems = List.of(widget.items);
+    _store.addListener(_onStoreChange);
+    _recompute();
+  }
+
+  @override
+  void dispose() {
+    _store.removeListener(_onStoreChange);
+    super.dispose();
+  }
+
+  void _onStoreChange() {
+    if (mounted) setState(() => _recompute());
+  }
+
+  void _recompute() {
+    var list = List.of(_baseItems);
+    // 筛选
+    switch (_filter) {
+      case '已收藏':
+        list = list.where((it) => it.isStarred).toList();
+        break;
+      case '待整理':
+        list = list.where((it) => !it.isParsed).toList();
+        break;
+      case '图集':
+        list = list.where((it) => it.type == MediaType.album).toList();
+        break;
+    }
+    // 搜索（匹配作者或标题）
+    if (_query.isNotEmpty) {
+      final q = _query.toLowerCase();
+      list = list
+          .where((it) =>
+              it.author.toLowerCase().contains(q) ||
+              it.title.toLowerCase().contains(q))
+          .toList();
+    }
+    // 排序
+    switch (_sort) {
+      case _SortMode.newest:
+        list.sort((a, b) => (b.timestamp ?? '').compareTo(a.timestamp ?? ''));
+        break;
+      case _SortMode.oldest:
+        list.sort((a, b) => (a.timestamp ?? '').compareTo(b.timestamp ?? ''));
+        break;
+      case _SortMode.starHigh:
+        list.sort((a, b) => b.star.compareTo(a.star));
+        break;
+    }
+    _filtered = list;
+    _groups = _groupByAuthor(list);
   }
 
   Map<String, List<MediaItem>> _groupByAuthor(List<MediaItem> items) {
@@ -41,10 +101,6 @@ class _GridPageState extends State<GridPage> {
       final key = item.isParsed ? item.author : '待整理';
       map.putIfAbsent(key, () => []).add(item);
     }
-    // 组内排序：待整理放最后，其余按时间戳
-    map.forEach((key, list) {
-      list.sort((a, b) => (a.timestamp ?? '').compareTo(b.timestamp ?? ''));
-    });
     return map;
   }
 
@@ -93,73 +149,50 @@ class _GridPageState extends State<GridPage> {
     });
   }
 
-  MediaItem? _findByPath(String path) {
-    for (final it in _items) {
-      if (it.path == path) return it;
-    }
-    return null;
+  void _selectGroup(String key) {
+    final group = _groups[key] ?? [];
+    setState(() {
+      _selectionMode = true;
+      for (final it in group) {
+        _selectedPaths.add(it.path);
+      }
+    });
   }
 
   Future<void> _batchStar(int star) async {
-    final paths = _selectedPaths.toList();
-    for (final p in paths) {
-      final item = _findByPath(p);
-      if (item == null) continue;
-      final newName = FilenameParser.buildStarredFilename(item.filename, star);
-      final newPath = await FileService.renameFile(p, newName);
-      if (newPath != null) {
-        await IndexService.updatePath(p, newPath);
-        final idx = _items.indexWhere((it) => it.path == p);
-        if (idx >= 0) _items[idx] = FilenameParser.parse(newPath);
-      }
-    }
-    if (mounted) {
-      setState(() {
-        _groups = _groupByAuthor(_items);
-        _selectedPaths.clear();
-        _selectionMode = false;
-      });
-    }
+    final (ok, fail) = await _store.batchStar(_selectedPaths.toList(), star);
+    _finishBatch('已标 $star 星', ok, fail);
   }
 
   Future<void> _batchDelete() async {
-    for (final p in _selectedPaths.toList()) {
-      await FileService.deleteToTrash(p);
-      await IndexService.updatePath(p, '');
-      await IndexService.removeThumbnail(p);
+    final (ok, fail) = await _store.batchDelete(_selectedPaths.toList());
+    if (_store.items.isEmpty && mounted) {
+      Navigator.of(context).pop();
+      return;
     }
-    if (mounted) {
-      setState(() {
-        _items.removeWhere((it) => _selectedPaths.contains(it.path));
-        _groups = _groupByAuthor(_items);
-        _selectedPaths.clear();
-        _selectionMode = false;
-      });
-      if (_items.isEmpty) Navigator.of(context).pop();
-    }
+    _finishBatch('已删除', ok, fail);
   }
 
   Future<void> _batchMove() async {
-    final first = _selectedPaths.first;
+    final paths = _selectedPaths.toList();
+    final first = paths.first;
     final parentDir = dirnameOf(first);
     final target = await showMoveDialog(context, parentDir);
     if (target == null) return;
-    for (final p in _selectedPaths.toList()) {
-      final name = p.split('/').last;
-      final ok = await FileService.moveFile(p, '$parentDir/$target');
-      if (ok) {
-        await IndexService.updatePath(p, '$parentDir/$target/$name');
-      }
-    }
-    if (mounted) {
-      setState(() {
-        _items.removeWhere((it) => _selectedPaths.contains(it.path));
-        _groups = _groupByAuthor(_items);
-        _selectedPaths.clear();
-        _selectionMode = false;
-      });
-      if (_items.isEmpty) Navigator.of(context).pop();
-    }
+    final (ok, fail) = await _store.batchMove(paths, '$parentDir/$target');
+    _finishBatch('已移动', ok, fail);
+  }
+
+  void _finishBatch(String action, int ok, int fail) {
+    if (!mounted) return;
+    setState(() {
+      _selectionMode = false;
+      _selectedPaths.clear();
+      _recompute();
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(fail == 0 ? '$action $ok 个' : '$action 成功 $ok 个，失败 $fail 个')),
+    );
   }
 
   void _openFeed(List<MediaItem> groupItems, int index) {
@@ -182,33 +215,134 @@ class _GridPageState extends State<GridPage> {
                 onPressed: _exitSelection,
               )
             : null,
-      ),
-      body: _groups.isEmpty
-          ? const Center(child: Text('没有内容'))
-          : ListView(
-              children: _buildGroupSections(),
+        actions: [
+          if (!_selectionMode) ...[
+            IconButton(
+              icon: const Icon(Icons.sort),
+              onPressed: _showSortMenu,
             ),
+          ],
+        ],
+      ),
+      body: Column(
+        children: [
+          _buildFilterBar(),
+          Expanded(
+            child: _filtered.isEmpty
+                ? const Center(child: Text('没有匹配的内容'))
+                : ListView(children: _buildGroupSections()),
+          ),
+        ],
+      ),
       bottomNavigationBar: _selectionMode ? _buildSelectionBar() : null,
+    );
+  }
+
+  Widget _buildFilterBar() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(8, 0, 8, 4),
+      child: Row(
+        children: [
+          Expanded(
+            child: TextField(
+              onChanged: (v) => setState(() {
+                _query = v;
+                _recompute();
+              }),
+              style: const TextStyle(color: Colors.white, fontSize: 14),
+              decoration: InputDecoration(
+                hintText: '搜索作者或标题',
+                hintStyle: const TextStyle(color: Colors.white38, fontSize: 14),
+                isDense: true,
+                prefixIcon: const Icon(Icons.search, color: Colors.white38, size: 18),
+                filled: true,
+                fillColor: Colors.grey.shade900,
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(8),
+                  borderSide: BorderSide.none,
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          DropdownButton<String>(
+            value: _filter,
+            dropdownColor: Colors.grey.shade900,
+            style: const TextStyle(color: Colors.white, fontSize: 13),
+            underline: const SizedBox.shrink(),
+            items: const ['全部', '已收藏', '待整理', '图集']
+                .map((f) => DropdownMenuItem(value: f, child: Text(f)))
+                .toList(),
+            onChanged: (v) => setState(() {
+              _filter = v!;
+              _recompute();
+            }),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showSortMenu() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.grey.shade900,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.new_releases, color: Colors.white),
+              title: const Text('最新在前', style: TextStyle(color: Colors.white)),
+              onTap: () {
+                setState(() {
+                  _sort = _SortMode.newest;
+                  _recompute();
+                });
+                Navigator.pop(ctx);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.history, color: Colors.white),
+              title: const Text('最旧在前', style: TextStyle(color: Colors.white)),
+              onTap: () {
+                setState(() {
+                  _sort = _SortMode.oldest;
+                  _recompute();
+                });
+                Navigator.pop(ctx);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.star, color: Colors.amber),
+              title: const Text('星级最高', style: TextStyle(color: Colors.white)),
+              onTap: () {
+                setState(() {
+                  _sort = _SortMode.starHigh;
+                  _recompute();
+                });
+                Navigator.pop(ctx);
+              },
+            ),
+          ],
+        ),
+      ),
     );
   }
 
   List<Widget> _buildGroupSections() {
     final widgets = <Widget>[];
-    // 作者组按名称排序，待整理放最后
     final keys = _groups.keys.toList()
       ..sort((a, b) {
         if (a == '待整理') return 1;
         if (b == '待整理') return -1;
         return a.compareTo(b);
       });
-
     for (final key in keys) {
       final list = _groups[key]!;
       final isCollapsed = _collapsed.contains(key);
       widgets.add(_buildHeader(key, list.length, isCollapsed));
-      if (!isCollapsed) {
-        widgets.add(_buildGrid(list));
-      }
+      if (!isCollapsed) widgets.add(_buildGrid(list));
     }
     return widgets;
   }
@@ -235,9 +369,10 @@ class _GridPageState extends State<GridPage> {
                 ),
               ),
             ),
-            Text(
-              '$count',
-              style: const TextStyle(color: Colors.grey),
+            Text('$count', style: const TextStyle(color: Colors.grey)),
+            IconButton(
+              icon: const Icon(Icons.select_all, size: 18, color: Colors.grey),
+              onPressed: () => _selectGroup(key),
             ),
           ],
         ),
@@ -285,17 +420,21 @@ class _GridPageState extends State<GridPage> {
                   top: 4,
                   right: 4,
                   child: Icon(
-                    selected
-                        ? Icons.check_circle
-                        : Icons.radio_button_unchecked,
+                    selected ? Icons.check_circle : Icons.radio_button_unchecked,
                     color: selected ? Colors.blue : Colors.white70,
                   ),
                 ),
               if (item.isStarred)
-                Positioned(
+                const Positioned(
                   top: 4,
                   left: 4,
                   child: Icon(Icons.star, size: 18, color: Colors.amber),
+                ),
+              if (item.isImage)
+                const Positioned(
+                  bottom: 4,
+                  right: 4,
+                  child: Icon(Icons.photo, size: 14, color: Colors.white70),
                 ),
             ],
           ),
@@ -333,7 +472,7 @@ class _GridPageState extends State<GridPage> {
   }
 }
 
-/// 缩略图：视频取首帧，图片直接用原图。
+/// 缩略图：视频取首帧并显示时长角标，图片直接用原图。
 class _Thumbnail extends StatelessWidget {
   final MediaItem item;
   final Future<Uint8List?> Function(String) loader;
@@ -346,12 +485,10 @@ class _Thumbnail extends StatelessWidget {
       return Image.file(
         File(item.path),
         fit: BoxFit.cover,
-        errorBuilder: (_, __, ___) => const Center(
-          child: Icon(Icons.broken_image, color: Colors.white54),
-        ),
+        errorBuilder: (_, __, ___) =>
+            const Center(child: Icon(Icons.broken_image, color: Colors.white54)),
       );
     }
-
     return FutureBuilder<Uint8List?>(
       future: loader(item.path),
       builder: (context, snapshot) {
@@ -368,15 +505,14 @@ class _Thumbnail extends StatelessWidget {
           );
         }
         final bytes = snapshot.data;
-        if (bytes == null) {
-          return Container(
-            color: Colors.grey.shade900,
-            child: const Center(
-              child: Icon(Icons.videocam, color: Colors.white54),
-            ),
-          );
-        }
-        return Image.memory(bytes, fit: BoxFit.cover, gaplessPlayback: true);
+        return bytes == null
+            ? Container(
+                color: Colors.grey.shade900,
+                child: const Center(
+                  child: Icon(Icons.videocam, color: Colors.white54),
+                ),
+              )
+            : Image.memory(bytes, fit: BoxFit.cover, gaplessPlayback: true);
       },
     );
   }

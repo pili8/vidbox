@@ -1,7 +1,7 @@
 name: vidbox
 description: 本地抖音视频管理器 - 全屏刷着顺手整理本地抖音下载的视频与图片
 publish_to: 'none'
-version: 0.0.4+4
+version: 0.1.0+10
 
 environment:
   sdk: '>=3.0.0 <4.0.0'

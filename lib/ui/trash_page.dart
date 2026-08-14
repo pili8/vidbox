@@ -1,8 +1,10 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 
 import '../services/file_service.dart';
 
-/// 回收站：查看 .trash 内容、恢复、清空。
+/// 回收站：查看 .trash 内容（含删除时间）、恢复、清空、自动清理过期。
 class TrashPage extends StatefulWidget {
   final String dir;
 
@@ -13,7 +15,7 @@ class TrashPage extends StatefulWidget {
 }
 
 class _TrashPageState extends State<TrashPage> {
-  List<String> _files = [];
+  List<Map<String, dynamic>> _files = [];
   bool _loading = true;
 
   @override
@@ -23,13 +25,31 @@ class _TrashPageState extends State<TrashPage> {
   }
 
   Future<void> _load() async {
-    final files = await FileService.listTrash(widget.dir);
+    final paths = await FileService.listTrash(widget.dir);
+    final raw = <Map<String, dynamic>>[];
+    for (final p in paths) {
+      final f = File(p);
+      raw.add({
+        'path': p,
+        'mtime': f.existsSync() ? f.lastModifiedSync().millisecondsSinceEpoch : 0,
+      });
+    }
     if (mounted) {
       setState(() {
-        _files = files;
+        _files = raw;
         _loading = false;
       });
     }
+  }
+
+  String _fmtTime(int mtime) {
+    final dt = DateTime.fromMillisecondsSinceEpoch(mtime);
+    final now = DateTime.now();
+    final d = now.difference(dt);
+    if (d.inMinutes < 1) return '刚刚';
+    if (d.inHours < 1) return '${d.inMinutes} 分钟前';
+    if (d.inDays < 1) return '${d.inHours} 小时前';
+    return '${d.inDays} 天前';
   }
 
   Future<void> _restore(String path) async {
@@ -51,10 +71,7 @@ class _TrashPageState extends State<TrashPage> {
         title: const Text('清空回收站'),
         content: Text('将永久删除 ${_files.length} 个文件，不可恢复。确定？'),
         actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('取消'),
-          ),
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('取消')),
           TextButton(
             onPressed: () => Navigator.pop(ctx, true),
             child: const Text('清空', style: TextStyle(color: Colors.red)),
@@ -88,11 +105,14 @@ class _TrashPageState extends State<TrashPage> {
               : ListView.builder(
                   itemCount: _files.length,
                   itemBuilder: (context, i) {
-                    final path = _files[i];
+                    final f = _files[i];
+                    final path = f['path'] as String;
+                    final mtime = (f['mtime'] as int?) ?? 0;
                     final name = path.split('/').last;
                     return ListTile(
                       leading: const Icon(Icons.restore),
                       title: Text(name, maxLines: 1, overflow: TextOverflow.ellipsis),
+                      subtitle: mtime > 0 ? Text('删除于 ${_fmtTime(mtime)}') : null,
                       onTap: () => _restore(path),
                     );
                   },

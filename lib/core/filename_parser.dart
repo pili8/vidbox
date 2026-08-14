@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import '../models/media_item.dart';
 
 /// 抖音下载文件名解析器。
@@ -102,6 +104,16 @@ class FilenameParser {
   static String buildStarredFilename(String filename, int star) {
     final s = star.clamp(1, 5);
     return filename.replaceFirst(RegExp(r'^dy\d'), 'dy$s');
+  }
+
+  /// 校验文件名（不含目录）的字节长度是否合法（≤255，UTF-8 中文占 3 字节）。
+  /// 返回 null 表示合法，否则返回错误信息。
+  static String? validateFilenameLength(String filename) {
+    final bytes = utf8.encode(filename).length;
+    if (bytes > 255) {
+      return '文件名过长（$bytes/255 字节）';
+    }
+    return null;
   }
 
   static String _basename(String path) {

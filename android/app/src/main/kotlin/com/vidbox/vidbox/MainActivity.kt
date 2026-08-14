@@ -5,16 +5,21 @@ import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import android.graphics.Bitmap
 import android.media.MediaMetadataRetriever
+import android.os.Handler
+import android.os.Looper
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.util.concurrent.Executors
 
 /// VidBox 原生文件操作通道。
 ///
-/// 个人侧载应用申请 MANAGE_EXTERNAL_STORAGE 后，直接用 java.io.File 操作，
-/// 无需 MediaStore 抽象。所有方法都在主线程的轻量文件元数据操作，
-/// 大量文件扫描的耗时问题后续再优化。
+/// 个人侧载应用申请 MANAGE_EXTERNAL_STORAGE 后，直接用 java.io.File 操作。
+/// 耗时操作（扫描、缩略图、回收站遍历）在后台线程执行，结果回主线程，
+/// 避免千级文件时主线程阻塞/ANR。
 class MainActivity : FlutterActivity() {
     private val channelName = "vidbox/file"
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val executor = Executors.newFixedThreadPool(4)
 
     private val mediaExtensions = setOf(
         ".mp4", ".webp", ".jpg", ".jpeg", ".png", ".gif",
@@ -26,51 +31,65 @@ class MainActivity : FlutterActivity() {
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
             .setMethodCallHandler { call, result ->
                 when (call.method) {
-                    "listMediaFiles" -> {
-                        val dir = call.argument<String>("dir") ?: ""
-                        result.success(listMediaFiles(dir))
+                    // 重操作：后台线程执行
+                    "listMediaFiles" -> runAsync(result) {
+                        listMediaFiles(call.argument<String>("dir") ?: "")
                     }
-                    "listMediaFilesMeta" -> {
-                        val dir = call.argument<String>("dir") ?: ""
-                        result.success(listMediaFilesMeta(dir))
+                    "listMediaFilesMeta" -> runAsync(result) {
+                        listMediaFilesMeta(call.argument<String>("dir") ?: "")
                     }
-                    "renameFile" -> {
-                        val src = call.argument<String>("src") ?: ""
-                        val newName = call.argument<String>("newName") ?: ""
-                        result.success(renameFile(src, newName))
+                    "getThumbnail" -> runAsync(result) {
+                        getThumbnail(call.argument<String>("path") ?: "")
                     }
-                    "moveFile" -> {
-                        val src = call.argument<String>("src") ?: ""
-                        val dstDir = call.argument<String>("dstDir") ?: ""
-                        result.success(moveFile(src, dstDir))
+                    "listTrash" -> runAsync(result) {
+                        listTrash(call.argument<String>("dir") ?: "")
                     }
-                    "deleteToTrash" -> {
-                        val src = call.argument<String>("src") ?: ""
-                        result.success(deleteToTrash(src))
+                    "cleanupTrash" -> runAsync(result) {
+                        cleanupTrash(
+                            call.argument<String>("dir") ?: "",
+                            call.argument<Int>("days") ?: 30,
+                        )
                     }
-                    "getThumbnail" -> {
-                        val path = call.argument<String>("path") ?: ""
-                        result.success(getThumbnail(path))
+                    "emptyTrash" -> runAsync(result) {
+                        emptyTrash(call.argument<String>("dir") ?: "")
                     }
-                    "listTrash" -> {
-                        val dir = call.argument<String>("dir") ?: ""
-                        result.success(listTrash(dir))
+                    "listSubDirs" -> runAsync(result) {
+                        listSubDirs(call.argument<String>("dir") ?: "")
                     }
-                    "restoreFromTrash" -> {
-                        val src = call.argument<String>("src") ?: ""
-                        result.success(restoreFromTrash(src))
-                    }
-                    "emptyTrash" -> {
-                        val dir = call.argument<String>("dir") ?: ""
-                        result.success(emptyTrash(dir))
-                    }
-                    "listSubDirs" -> {
-                        val dir = call.argument<String>("dir") ?: ""
-                        result.success(listSubDirs(dir))
-                    }
+                    // 轻操作：主线程直接执行
+                    "renameFile" -> result.success(
+                        renameFile(
+                            call.argument<String>("src") ?: "",
+                            call.argument<String>("newName") ?: "",
+                        )
+                    )
+                    "moveFile" -> result.success(
+                        moveFile(
+                            call.argument<String>("src") ?: "",
+                            call.argument<String>("dstDir") ?: "",
+                        )
+                    )
+                    "deleteToTrash" -> result.success(
+                        deleteToTrash(call.argument<String>("src") ?: "")
+                    )
+                    "restoreFromTrash" -> result.success(
+                        restoreFromTrash(call.argument<String>("src") ?: "")
+                    )
                     else -> result.notImplemented()
                 }
             }
+    }
+
+    /// 在后台线程执行 [block]，完成后回到主线程用 [result] 返回。
+    private fun <T> runAsync(result: MethodChannel.Result, block: () -> T) {
+        executor.execute {
+            val value = try {
+                block()
+            } catch (e: Exception) {
+                null
+            }
+            mainHandler.post { result.success(value) }
+        }
     }
 
     // 返回每个媒体文件的 {path, mtime, size}，供 Dart 侧做增量索引。
@@ -160,6 +179,19 @@ class MainActivity : FlutterActivity() {
         } catch (e: Exception) {
             null
         }
+    }
+
+    /// 清理 .trash 中超过 [days] 天的文件，返回删除的文件数。
+    private fun cleanupTrash(dir: String, days: Int): Int {
+        val trashDir = File(dir, ".trash")
+        if (!trashDir.exists() || !trashDir.isDirectory) return 0
+        val cutoff = System.currentTimeMillis() - days * 24L * 3600L * 1000L
+        val files = trashDir.listFiles { f -> f.isFile } ?: return 0
+        var removed = 0
+        for (f in files) {
+            if (f.lastModified() < cutoff && f.delete()) removed++
+        }
+        return removed
     }
 
     private fun listTrash(dir: String): List<String> {

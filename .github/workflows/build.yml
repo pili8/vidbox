@@ -29,8 +29,15 @@ jobs:
       - name: Generate platform scaffold
         run: flutter create --org com.vidbox --project-name vidbox --platforms android .
 
+      # 移除 flutter create 生成的默认 widget_test.dart（引用不存在的 MyApp，导致测试编译失败）
+      - name: Remove default widget test
+        run: rm -f test/widget_test.dart
+
       - name: Install dependencies
         run: flutter pub get
+
+      - name: Run tests
+        run: flutter test
 
       - name: Build release APK
         run: flutter build apk --release

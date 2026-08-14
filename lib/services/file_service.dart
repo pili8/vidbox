@@ -94,6 +94,15 @@ class FileService {
         false;
   }
 
+  /// 清理回收站中超过 [days] 天的文件，返回清理数量。
+  static Future<int> cleanupTrash(String dir, {int days = 30}) async {
+    return await _channel.invokeMethod<int>(
+          'cleanupTrash',
+          {'dir': dir, 'days': days},
+        ) ??
+        0;
+  }
+
   /// 列出目录下的子目录名（排除隐藏目录），用于分类移动。
   static Future<List<String>> listSubDirs(String dir) async {
     return await _channel.invokeListMethod<String>(

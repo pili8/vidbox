@@ -3,13 +3,11 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:video_player/video_player.dart';
 
-import '../core/filename_parser.dart';
 import '../models/media_item.dart';
-import '../services/file_service.dart';
-import '../services/index_service.dart';
+import '../services/media_store.dart';
 import 'move_dialog.dart';
 
-/// 全屏流浏览：上下滑切换，双击星标，底部操作条。
+/// 全屏流浏览：上下滑切换视频/图集，双击星标，底部操作条。
 class FeedPage extends StatefulWidget {
   final List<MediaItem> items;
   final int startIndex;
@@ -25,12 +23,15 @@ class _FeedPageState extends State<FeedPage> {
   late List<MediaItem> _items;
   int _currentIndex = 0;
 
+  MediaStore get _store => MediaStore.instance;
+
   @override
   void initState() {
     super.initState();
     _currentIndex = widget.startIndex;
     _items = List.of(widget.items);
     _controller = PageController(initialPage: widget.startIndex);
+    _markCurrentSeen();
   }
 
   @override
@@ -39,59 +40,107 @@ class _FeedPageState extends State<FeedPage> {
     super.dispose();
   }
 
-  Future<void> _toggleStar(int i) async {
-    final item = _items[i];
-    // 未收藏（dy1）→ 收藏（dy5）；已收藏 → 回到 dy1
+  void _markCurrentSeen() {
+    if (_currentIndex < _items.length) {
+      _store.markSeen(_items[_currentIndex].path);
+    }
+  }
+
+  Future<void> _toggleStar() async {
+    final item = _items[_currentIndex];
+    final idx = _store.indexOf(item.path);
+    if (idx < 0) return;
     final newStar = item.isStarred ? 1 : 5;
-    final newName = FilenameParser.buildStarredFilename(item.filename, newStar);
-    final newPath = await FileService.renameFile(item.path, newName);
-    if (newPath != null) {
-      await IndexService.updatePath(item.path, newPath);
-      if (mounted) {
-        setState(() => _items[i] = FilenameParser.parse(newPath));
-      }
+    final ok = await _store.setStar(idx, newStar);
+    if (ok && mounted) {
+      setState(() {
+        _items[_currentIndex] = _store.items[idx];
+      });
     }
   }
 
-  Future<void> _setStar(int i, int star) async {
-    final item = _items[i];
-    final newName = FilenameParser.buildStarredFilename(item.filename, star);
-    final newPath = await FileService.renameFile(item.path, newName);
-    if (newPath != null) {
-      await IndexService.updatePath(item.path, newPath);
-      if (mounted) {
-        setState(() => _items[i] = FilenameParser.parse(newPath));
-      }
+  Future<void> _setStar(int star) async {
+    final item = _items[_currentIndex];
+    final idx = _store.indexOf(item.path);
+    if (idx < 0) return;
+    final ok = await _store.setStar(idx, star);
+    if (ok && mounted) {
+      setState(() {
+        _items[_currentIndex] = _store.items[idx];
+      });
     }
   }
 
-  Future<void> _delete(int i) async {
-    final ok = await FileService.deleteToTrash(_items[i].path);
-    if (ok) {
-      await IndexService.updatePath(_items[i].path, '');
-      await IndexService.removeThumbnail(_items[i].path);
-      if (mounted) {
-        setState(() {
-          _items.removeAt(i);
-          if (_items.isEmpty) Navigator.of(context).pop();
-        });
-      }
+  Future<void> _delete() async {
+    final item = _items[_currentIndex];
+    final idx = _store.indexOf(item.path);
+    if (idx < 0) return;
+    final ok = await _store.delete(idx);
+    if (ok && mounted) {
+      setState(() {
+        _items.removeAt(_currentIndex);
+        if (_items.isEmpty) {
+          Navigator.of(context).pop();
+        } else if (_currentIndex >= _items.length) {
+          _currentIndex = _items.length - 1;
+        }
+      });
     }
   }
 
-  Future<void> _move(int i) async {
-    final item = _items[i];
+  Future<void> _move() async {
+    final item = _items[_currentIndex];
     final parentDir = dirnameOf(item.path);
     final target = await showMoveDialog(context, parentDir);
     if (target == null) return;
-    final ok = await FileService.moveFile(item.path, '$parentDir/$target');
-    if (ok) {
-      await IndexService.updatePath(item.path, '$parentDir/$target/${item.filename}');
-      if (mounted) {
-        setState(() {
-          _items.removeAt(i);
-          if (_items.isEmpty) Navigator.of(context).pop();
-        });
+    final idx = _store.indexOf(item.path);
+    if (idx < 0) return;
+    final ok = await _store.move(idx, '$parentDir/$target');
+    if (ok && mounted) {
+      setState(() {
+        _items.removeAt(_currentIndex);
+        if (_items.isEmpty) {
+          Navigator.of(context).pop();
+        } else if (_currentIndex >= _items.length) {
+          _currentIndex = _items.length - 1;
+        }
+      });
+    }
+  }
+
+  Future<void> _rename() async {
+    final item = _items[_currentIndex];
+    final controller = TextEditingController(text: item.filename);
+    final newName = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('重命名'),
+        content: TextField(
+          controller: controller,
+          decoration: const InputDecoration(
+            hintText: '新文件名（含扩展名）',
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, controller.text.trim()),
+            child: const Text('确定'),
+          ),
+        ],
+      ),
+    );
+    if (newName == null || newName.isEmpty || newName == item.filename) return;
+    final idx = _store.indexOf(item.path);
+    if (idx < 0) return;
+    final ok = await _store.rename(idx, newName);
+    if (mounted) {
+      if (ok) {
+        setState(() => _items[_currentIndex] = _store.items[idx]);
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('重命名失败（文件名可能不合法）')),
+        );
       }
     }
   }
@@ -101,7 +150,6 @@ class _FeedPageState extends State<FeedPage> {
     if (_items.isEmpty) {
       return const Scaffold(body: Center(child: Text('没有内容')));
     }
-
     final item = _items[_currentIndex];
 
     return Scaffold(
@@ -112,14 +160,25 @@ class _FeedPageState extends State<FeedPage> {
             controller: _controller,
             scrollDirection: Axis.vertical,
             itemCount: _items.length,
-            onPageChanged: (i) => setState(() => _currentIndex = i),
+            onPageChanged: (i) {
+              setState(() => _currentIndex = i);
+              _markCurrentSeen();
+            },
             itemBuilder: (context, i) => _FeedItem(
               item: _items[i],
               isActive: i == _currentIndex,
-              onDoubleTap: () => _toggleStar(i),
+              onDoubleTap: _toggleStar,
             ),
           ),
-          // 底部信息 + 操作条
+          // 位置指示
+          Positioned(
+            top: MediaQuery.of(context).padding.top + 8,
+            right: 12,
+            child: Text(
+              '${_currentIndex + 1} / ${_items.length}',
+              style: const TextStyle(color: Colors.white70, fontSize: 13),
+            ),
+          ),
           Positioned(
             left: 0,
             right: 0,
@@ -171,18 +230,18 @@ class _FeedPageState extends State<FeedPage> {
           const SizedBox(height: 8),
           Row(
             children: [
-              // 星标按钮
+              // 星标切换
               IconButton(
-                onPressed: () => _toggleStar(_currentIndex),
+                onPressed: _toggleStar,
                 icon: Icon(
                   item.isStarred ? Icons.star : Icons.star_border,
                   color: item.isStarred ? Colors.amber : Colors.white,
                 ),
               ),
-              // 星级选择
+              // 星级 1~5
               for (var s = 1; s <= 5; s++)
                 GestureDetector(
-                  onTap: () => _setStar(_currentIndex, s),
+                  onTap: () => _setStar(s),
                   child: Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 2),
                     child: Icon(
@@ -193,14 +252,17 @@ class _FeedPageState extends State<FeedPage> {
                   ),
                 ),
               const Spacer(),
-              // 移动
               IconButton(
-                onPressed: () => _move(_currentIndex),
+                onPressed: _rename,
+                icon: const Icon(Icons.edit_outlined, color: Colors.white),
+                tooltip: '重命名',
+              ),
+              IconButton(
+                onPressed: _move,
                 icon: const Icon(Icons.drive_file_move, color: Colors.white),
               ),
-              // 删除
               IconButton(
-                onPressed: () => _delete(_currentIndex),
+                onPressed: _delete,
                 icon: const Icon(Icons.delete_outline, color: Colors.white),
               ),
             ],
@@ -211,7 +273,7 @@ class _FeedPageState extends State<FeedPage> {
   }
 }
 
-/// 单个 feed 项：视频自动循环播放，图片静态展示。
+/// 单个 feed 项：视频循环播放，图片静态展示；支持单击暂停/缩放。
 class _FeedItem extends StatefulWidget {
   final MediaItem item;
   final bool isActive;
@@ -230,6 +292,8 @@ class _FeedItem extends StatefulWidget {
 class _FeedItemState extends State<_FeedItem> {
   VideoPlayerController? _videoController;
   bool _inited = false;
+  bool _playing = true;
+  bool _zoomContain = true; // true=适应屏幕, false=填满
 
   @override
   void initState() {
@@ -246,7 +310,10 @@ class _FeedItemState extends State<_FeedItem> {
     await controller.setVolume(1.0);
     if (mounted) {
       setState(() => _inited = true);
-      if (widget.isActive) controller.play();
+      if (widget.isActive) {
+        controller.play();
+        _playing = true;
+      }
     }
   }
 
@@ -257,8 +324,10 @@ class _FeedItemState extends State<_FeedItem> {
     if (c == null || !_inited) return;
     if (widget.isActive && !oldWidget.isActive) {
       c.play();
+      _playing = true;
     } else if (!widget.isActive && oldWidget.isActive) {
       c.pause();
+      _playing = false;
     }
   }
 
@@ -268,15 +337,34 @@ class _FeedItemState extends State<_FeedItem> {
     super.dispose();
   }
 
+  void _togglePause() {
+    final c = _videoController;
+    if (widget.item.isImage) {
+      setState(() => _zoomContain = !_zoomContain);
+      return;
+    }
+    if (c == null || !_inited) return;
+    setState(() {
+      if (_playing) {
+        c.pause();
+        _playing = false;
+      } else {
+        c.play();
+        _playing = true;
+      }
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     if (widget.item.isImage) {
       return GestureDetector(
         onDoubleTap: widget.onDoubleTap,
+        onTap: _togglePause,
         child: Center(
           child: Image.file(
             File(widget.item.path),
-            fit: BoxFit.contain,
+            fit: _zoomContain ? BoxFit.contain : BoxFit.cover,
             errorBuilder: (_, __, ___) =>
                 const Icon(Icons.broken_image, color: Colors.white54, size: 48),
           ),
@@ -290,11 +378,18 @@ class _FeedItemState extends State<_FeedItem> {
 
     return GestureDetector(
       onDoubleTap: widget.onDoubleTap,
-      child: Center(
-        child: AspectRatio(
-          aspectRatio: _videoController!.value.aspectRatio,
-          child: VideoPlayer(_videoController!),
-        ),
+      onTap: _togglePause,
+      child: Stack(
+        children: [
+          Center(
+            child: AspectRatio(
+              aspectRatio: _videoController!.value.aspectRatio,
+              child: VideoPlayer(_videoController!),
+            ),
+          ),
+          if (!_playing)
+            const Center(child: Icon(Icons.play_circle_outline, color: Colors.white70, size: 64)),
+        ],
       ),
     );
   }
