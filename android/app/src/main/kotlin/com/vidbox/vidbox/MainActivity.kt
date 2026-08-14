@@ -30,6 +30,10 @@ class MainActivity : FlutterActivity() {
                         val dir = call.argument<String>("dir") ?: ""
                         result.success(listMediaFiles(dir))
                     }
+                    "listMediaFilesMeta" -> {
+                        val dir = call.argument<String>("dir") ?: ""
+                        result.success(listMediaFilesMeta(dir))
+                    }
                     "renameFile" -> {
                         val src = call.argument<String>("src") ?: ""
                         val newName = call.argument<String>("newName") ?: ""
@@ -67,6 +71,31 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
+    }
+
+    // 返回每个媒体文件的 {path, mtime, size}，供 Dart 侧做增量索引。
+    private fun listMediaFilesMeta(dir: String): List<Map<String, Any>> {
+        val d = File(dir)
+        if (!d.exists() || !d.isDirectory) return emptyList()
+        val result = mutableListOf<Map<String, Any>>()
+        fun walk(f: File) {
+            val children = f.listFiles() ?: return
+            for (c in children) {
+                when {
+                    c.isDirectory && !c.name.startsWith(".") -> walk(c)
+                    c.isFile && mediaExtensions.any { c.name.lowercase().endsWith(it) } ->
+                        result.add(
+                            mapOf(
+                                "path" to c.absolutePath,
+                                "mtime" to c.lastModified(),
+                                "size" to c.length(),
+                            )
+                        )
+                }
+            }
+        }
+        walk(d)
+        return result
     }
 
     private fun listMediaFiles(dir: String): List<String> {

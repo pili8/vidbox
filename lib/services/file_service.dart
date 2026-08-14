@@ -20,6 +20,19 @@ class FileService {
     return result ?? const [];
   }
 
+  /// 列出目录下所有媒体文件的元数据（path/mtime/size），供增量索引。
+  static Future<List<Map<String, Object>>> listMediaFilesMeta(
+      String dir) async {
+    final result = await _channel.invokeListMethod<Map<Object?, Object?>>(
+      'listMediaFilesMeta',
+      {'dir': dir},
+    );
+    if (result == null) return const [];
+    return result
+        .map((m) => m.map((k, v) => MapEntry(k as String, v as Object)))
+        .toList();
+  }
+
   /// 重命名文件（文件名不含目录），返回新的完整路径；失败返回 null。
   static Future<String?> renameFile(String srcPath, String newName) async {
     return await _channel.invokeMethod<String>(

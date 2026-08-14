@@ -45,7 +45,8 @@ class MediaItem {
   /// 扩展名（含点，如 .mp4）
   final String ext;
 
-  /// 星标等级 0~5，0 表示未标星
+  /// 星标等级（来自文件名 dy<N>）：1~5。
+  /// dy1 为基线（未收藏），≥2 表示已收藏/标星；0 表示未解析。
   final int star;
 
   const MediaItem({
@@ -69,8 +70,8 @@ class MediaItem {
     return e == '.webp' || e == '.jpg' || e == '.jpeg' || e == '.png' || e == '.gif';
   }
 
-  /// 是否已标星
-  bool get isStarred => star > 0;
+  /// 是否已标星/收藏（星级 ≥2 才算收藏，dy1 是基线不高亮）
+  bool get isStarred => star >= 2;
 
   @override
   String toString() => 'MediaItem($author, $type, "$title", ★$star)';

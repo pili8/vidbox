@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import '../core/filename_parser.dart';
 import '../models/media_item.dart';
 import '../services/file_service.dart';
+import '../services/index_service.dart';
 import 'feed_page.dart';
 import 'move_dialog.dart';
 
@@ -51,7 +52,7 @@ class _GridPageState extends State<GridPage> {
     if (_thumbCache.containsKey(path)) {
       return Future.value(_thumbCache[path]);
     }
-    return FileService.getThumbnail(path).then((b) {
+    return IndexService.getThumbnail(path).then((b) {
       _thumbCache[path] = b;
       return b;
     });
@@ -107,6 +108,7 @@ class _GridPageState extends State<GridPage> {
       final newName = FilenameParser.buildStarredFilename(item.filename, star);
       final newPath = await FileService.renameFile(p, newName);
       if (newPath != null) {
+        await IndexService.updatePath(p, newPath);
         final idx = _items.indexWhere((it) => it.path == p);
         if (idx >= 0) _items[idx] = FilenameParser.parse(newPath);
       }
@@ -123,6 +125,8 @@ class _GridPageState extends State<GridPage> {
   Future<void> _batchDelete() async {
     for (final p in _selectedPaths.toList()) {
       await FileService.deleteToTrash(p);
+      await IndexService.updatePath(p, '');
+      await IndexService.removeThumbnail(p);
     }
     if (mounted) {
       setState(() {
@@ -141,7 +145,11 @@ class _GridPageState extends State<GridPage> {
     final target = await showMoveDialog(context, parentDir);
     if (target == null) return;
     for (final p in _selectedPaths.toList()) {
-      await FileService.moveFile(p, '$parentDir/$target');
+      final name = p.split('/').last;
+      final ok = await FileService.moveFile(p, '$parentDir/$target');
+      if (ok) {
+        await IndexService.updatePath(p, '$parentDir/$target/$name');
+      }
     }
     if (mounted) {
       setState(() {

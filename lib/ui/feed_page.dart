@@ -6,6 +6,7 @@ import 'package:video_player/video_player.dart';
 import '../core/filename_parser.dart';
 import '../models/media_item.dart';
 import '../services/file_service.dart';
+import '../services/index_service.dart';
 import 'move_dialog.dart';
 
 /// 全屏流浏览：上下滑切换，双击星标，底部操作条。
@@ -40,11 +41,15 @@ class _FeedPageState extends State<FeedPage> {
 
   Future<void> _toggleStar(int i) async {
     final item = _items[i];
-    final newStar = item.star > 0 ? 0 : 1;
+    // 未收藏（dy1）→ 收藏（dy5）；已收藏 → 回到 dy1
+    final newStar = item.isStarred ? 1 : 5;
     final newName = FilenameParser.buildStarredFilename(item.filename, newStar);
     final newPath = await FileService.renameFile(item.path, newName);
-    if (newPath != null && mounted) {
-      setState(() => _items[i] = FilenameParser.parse(newPath));
+    if (newPath != null) {
+      await IndexService.updatePath(item.path, newPath);
+      if (mounted) {
+        setState(() => _items[i] = FilenameParser.parse(newPath));
+      }
     }
   }
 
@@ -52,18 +57,25 @@ class _FeedPageState extends State<FeedPage> {
     final item = _items[i];
     final newName = FilenameParser.buildStarredFilename(item.filename, star);
     final newPath = await FileService.renameFile(item.path, newName);
-    if (newPath != null && mounted) {
-      setState(() => _items[i] = FilenameParser.parse(newPath));
+    if (newPath != null) {
+      await IndexService.updatePath(item.path, newPath);
+      if (mounted) {
+        setState(() => _items[i] = FilenameParser.parse(newPath));
+      }
     }
   }
 
   Future<void> _delete(int i) async {
     final ok = await FileService.deleteToTrash(_items[i].path);
-    if (ok && mounted) {
-      setState(() {
-        _items.removeAt(i);
-        if (_items.isEmpty) Navigator.of(context).pop();
-      });
+    if (ok) {
+      await IndexService.updatePath(_items[i].path, '');
+      await IndexService.removeThumbnail(_items[i].path);
+      if (mounted) {
+        setState(() {
+          _items.removeAt(i);
+          if (_items.isEmpty) Navigator.of(context).pop();
+        });
+      }
     }
   }
 
@@ -73,11 +85,14 @@ class _FeedPageState extends State<FeedPage> {
     final target = await showMoveDialog(context, parentDir);
     if (target == null) return;
     final ok = await FileService.moveFile(item.path, '$parentDir/$target');
-    if (ok && mounted) {
-      setState(() {
-        _items.removeAt(i);
-        if (_items.isEmpty) Navigator.of(context).pop();
-      });
+    if (ok) {
+      await IndexService.updatePath(item.path, '$parentDir/$target/${item.filename}');
+      if (mounted) {
+        setState(() {
+          _items.removeAt(i);
+          if (_items.isEmpty) Navigator.of(context).pop();
+        });
+      }
     }
   }
 

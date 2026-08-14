@@ -5,6 +5,7 @@ import '../core/filename_parser.dart';
 import '../core/grouper.dart';
 import '../models/media_item.dart';
 import '../services/file_service.dart';
+import '../services/index_service.dart';
 import '../services/settings_service.dart';
 import 'feed_page.dart';
 import 'grid_page.dart';
@@ -78,12 +79,8 @@ class _HomePageState extends State<HomePage> {
     });
 
     try {
-      final allPaths = <String>[];
-      for (final dir in _dirs) {
-        final paths = await FileService.listMediaFiles(dir);
-        allPaths.addAll(paths);
-      }
-      final items = allPaths.map(FilenameParser.parse).toList();
+      // 增量索引：未变化的文件直接读缓存，只重新解析变化的文件
+      final items = await IndexService.scanAndIndex(_dirs);
       final grouping = Grouper.group(items);
       if (mounted) {
         setState(() {
@@ -147,11 +144,14 @@ class _HomePageState extends State<HomePage> {
 
     if (newName == null || newName.isEmpty || newName == item.filename) return;
     final newPath = await FileService.renameFile(item.path, newName);
-    if (newPath != null && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('已重命名，重新扫描后归位')),
-      );
-      _scan();
+    if (newPath != null) {
+      await IndexService.updatePath(item.path, newPath);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('已重命名，重新扫描后归位')),
+        );
+        _scan();
+      }
     }
   }
 
