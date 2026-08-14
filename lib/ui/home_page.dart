@@ -6,6 +6,7 @@ import '../core/grouper.dart';
 import '../models/media_item.dart';
 import '../services/file_service.dart';
 import 'feed_page.dart';
+import 'grid_page.dart';
 
 /// 首页：申请权限、选择扫描目录、展示分组结果。
 class HomePage extends StatefulWidget {
@@ -72,6 +73,14 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  void _openGrid() {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => GridPage(items: _items, startIndex: 0),
+      ),
+    );
+  }
+
   void _openFeed(List<MediaItem> items, int startIndex) {
     Navigator.of(context).push(
       MaterialPageRoute(
@@ -83,7 +92,15 @@ class _HomePageState extends State<HomePage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('VidBox')),
+      appBar: AppBar(
+        title: const Text('VidBox'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.grid_view),
+            onPressed: _items.isEmpty ? null : _openGrid,
+          ),
+        ],
+      ),
       body: Column(
         children: [
           _buildScanBar(),

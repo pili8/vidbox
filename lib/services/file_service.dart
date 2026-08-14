@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'package:flutter/services.dart';
 
 /// 文件操作服务（Dart 侧）。
@@ -42,5 +44,13 @@ class FileService {
           {'src': srcPath},
         ) ??
         false;
+  }
+
+  /// 获取视频首帧缩略图（JPEG 字节），失败或图片返回 null。
+  static Future<Uint8List?> getThumbnail(String path) async {
+    return await _channel.invokeMethod<Uint8List>(
+      'getThumbnail',
+      {'path': path},
+    );
   }
 }

@@ -3,6 +3,9 @@ package com.vidbox.vidbox
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import android.graphics.Bitmap
+import android.media.MediaMetadataRetriever
+import java.io.ByteArrayOutputStream
 import java.io.File
 
 /// VidBox 原生文件操作通道。
@@ -40,6 +43,10 @@ class MainActivity : FlutterActivity() {
                     "deleteToTrash" -> {
                         val src = call.argument<String>("src") ?: ""
                         result.success(deleteToTrash(src))
+                    }
+                    "getThumbnail" -> {
+                        val path = call.argument<String>("path") ?: ""
+                        result.success(getThumbnail(path))
                     }
                     else -> result.notImplemented()
                 }
@@ -79,5 +86,23 @@ class MainActivity : FlutterActivity() {
         if (!trashDir.exists()) trashDir.mkdirs()
         val dest = File(trashDir, f.name)
         return if (dest.exists()) false else f.renameTo(dest)
+    }
+
+    private fun getThumbnail(path: String): ByteArray? {
+        return try {
+            val retriever = MediaMetadataRetriever()
+            retriever.setDataSource(path)
+            val bitmap = retriever.getFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+            retriever.release()
+            if (bitmap == null) {
+                null
+            } else {
+                val stream = ByteArrayOutputStream()
+                bitmap.compress(Bitmap.CompressFormat.JPEG, 80, stream)
+                stream.toByteArray()
+            }
+        } catch (e: Exception) {
+            null
+        }
     }
 }
